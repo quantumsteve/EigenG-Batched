@@ -77,8 +77,10 @@ eigen_GPU_check.o: eigen_GPU_check.cu
 	$(NVCC) -c -o $@ $(NVCCOPT) $<
 
 test_complex: a.out-complex
-a.out-complex: main_complex.cpp eigen_GPU_batch.o
-	$(NVCC) -o $@ main_complex.cpp eigen_GPU_batch.o -I$(CUDA_PATH)/include -L$(CUDA_PATH)/lib64 -lcudart -lm
+main_complex.o: main_complex.cpp
+	$(NVCC) -c -o $@ $< -I$(CUDA_PATH)/include
+a.out-complex: main_complex.o eigen_GPU_batch.o
+	$(NVCC) -o $@ main_complex.o eigen_GPU_batch.o -L$(CUDA_PATH)/lib64 -lcudart -lm
 
 clean:
 	-\rm a.out a.out-* *.o *.cu_o *.ptx lib*.a
