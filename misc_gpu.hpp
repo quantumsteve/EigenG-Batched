@@ -18,6 +18,8 @@
 #include <hip/amd_detail/amd_hip_cooperative_groups.h>
 #endif
 
+#include "complex_gpu.hpp"
+
 #undef COOPERATIVE_GROUP_STANDARD
 #if defined(__HIPCC__)
 #include <hip/hip_version.h>
@@ -119,6 +121,13 @@ float __Volatile__(const float x) {
   asm volatile ("": "+f"(x_));
 #endif  
   return x_;
+}
+
+
+template < class R >
+__host__ __device__ __forceinline__
+gpu_complex<R> __Volatile__(const gpu_complex<R> &x) {
+  return gpu_complex<R>(__Volatile__(x.re), __Volatile__(x.im));
 }
 
 
@@ -582,6 +591,56 @@ void sync_on_cg(void) {
 
 //---------------------------------------------------------------------
 //
+// shuffle wrappers: the generic version forwards to the intrinsic, the
+// gpu_complex overloads shuffle the real and imaginary parts separately.
+//
+template < class T >
+__device__ __forceinline__
+T gpu_shfl(const T x, const int lane)
+{
+#if defined(__NVCC__)
+  return __shfl_sync( 0xffffffff, x, lane, WARP_GPU_SIZE );
+#else
+  return __shfl( x, lane, WARP_GPU_SIZE );
+#endif
+}
+template < class T >
+__device__ __forceinline__
+T gpu_shfl_xor(const T x, const int lane)
+{
+#if defined(__NVCC__)
+  return __shfl_xor_sync( 0xffffffff, x, lane, WARP_GPU_SIZE );
+#else
+  return __shfl_xor( x, lane, WARP_GPU_SIZE );
+#endif
+}
+template < class R >
+__device__ __forceinline__
+gpu_complex<R> gpu_shfl(const gpu_complex<R> x, const int lane)
+{ return gpu_complex<R>( gpu_shfl(x.re, lane), gpu_shfl(x.im, lane) ); }
+template < class R >
+__device__ __forceinline__
+gpu_complex<R> gpu_shfl_xor(const gpu_complex<R> x, const int lane)
+{ return gpu_complex<R>( gpu_shfl_xor(x.re, lane), gpu_shfl_xor(x.im, lane) ); }
+
+template < class G, class T >
+__device__ __forceinline__
+T cg_shfl(G &g, const T x, const int lane) { return g.shfl(x, lane); }
+template < class G, class T >
+__device__ __forceinline__
+T cg_shfl_xor(G &g, const T x, const int lane) { return g.shfl_xor(x, lane); }
+template < class G, class R >
+__device__ __forceinline__
+gpu_complex<R> cg_shfl(G &g, const gpu_complex<R> x, const int lane)
+{ return gpu_complex<R>( g.shfl(x.re, lane), g.shfl(x.im, lane) ); }
+template < class G, class R >
+__device__ __forceinline__
+gpu_complex<R> cg_shfl_xor(G &g, const gpu_complex<R> x, const int lane)
+{ return gpu_complex<R>( g.shfl_xor(x.re, lane), g.shfl_xor(x.im, lane) ); }
+
+
+//---------------------------------------------------------------------
+//
 // collective:: bcast
 //
 template <class T>
@@ -590,10 +649,10 @@ void bcast_on_warp(T &x_, const int root)
 {
   T x = x_;
 #if defined(__NVCC__)
-  x = __shfl_sync( 0xffffffff, x, root-1, WARP_GPU_SIZE );
+  x = gpu_shfl(x, root-1);
 #endif
 #if defined(__HIPCC__)
-  x = __shfl( x, root-1, WARP_GPU_SIZE );
+  x = gpu_shfl(x, root-1);
 #endif
   x_ = x;
 }
@@ -620,7 +679,7 @@ void bcast_on_cg(T &x, const int root) {
 #else
   cooperative_groups::thread_block_tile_base<tile_size> __cooperative_group__;
 #endif
-  x = __cooperative_group__.shfl(x, (root)-1);
+  x = cg_shfl(__cooperative_group__, x, (root)-1);
 }
 
 
@@ -634,20 +693,20 @@ void sum_on_warp(T &x_)
 {
   T x = x_;
 #if defined(__NVCC__)
-  x += __shfl_xor_sync( 0xffffffff, x, 1, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 2, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 4, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 8, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 16, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 1);
+  x += gpu_shfl_xor(x, 2);
+  x += gpu_shfl_xor(x, 4);
+  x += gpu_shfl_xor(x, 8);
+  x += gpu_shfl_xor(x, 16);
 #endif
 #if defined(__HIPCC__)
-  x += __shfl_xor( x, 1, WARP_GPU_SIZE );
-  x += __shfl_xor( x, 2, WARP_GPU_SIZE );
-  x += __shfl_xor( x, 4, WARP_GPU_SIZE );
-  x += __shfl_xor( x, 8, WARP_GPU_SIZE );
-  x += __shfl_xor( x, 16, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 1);
+  x += gpu_shfl_xor(x, 2);
+  x += gpu_shfl_xor(x, 4);
+  x += gpu_shfl_xor(x, 8);
+  x += gpu_shfl_xor(x, 16);
 #if WARP_GPU_SIZE == 64
-  x += __shfl_xor( x, 32, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 32);
 #endif
 #endif
   x_ = x;
@@ -688,7 +747,7 @@ void sum_on_cg(T &x_) {
   const int myid = __cooperative_group__.thread_rank()+1;
   T x = x_;
   for(int lane=1; lane<tile_size; lane<<=1) {
-    x += __cooperative_group__.shfl_xor(x, lane);
+    x += cg_shfl_xor(__cooperative_group__, x, lane);
   }
   x_ = x;
 }
@@ -704,20 +763,20 @@ void max_on_warp(T &x_)
 {
   T x = x_;
 #if defined(__CUDA_ARCH__)
-  x = Max(x, __shfl_xor_sync( 0xffffffff, x, 1, WARP_GPU_SIZE ));
-  x = Max(x, __shfl_xor_sync( 0xffffffff, x, 2, WARP_GPU_SIZE ));
-  x = Max(x, __shfl_xor_sync( 0xffffffff, x, 4, WARP_GPU_SIZE ));
-  x = Max(x, __shfl_xor_sync( 0xffffffff, x, 8, WARP_GPU_SIZE ));
-  x = Max(x, __shfl_xor_sync( 0xffffffff, x, 16, WARP_GPU_SIZE ));
+  x = Max(x, gpu_shfl_xor(x, 1));
+  x = Max(x, gpu_shfl_xor(x, 2));
+  x = Max(x, gpu_shfl_xor(x, 4));
+  x = Max(x, gpu_shfl_xor(x, 8));
+  x = Max(x, gpu_shfl_xor(x, 16));
 #endif
 #if defined(__HIPCC__)
-  x = Max(x, __shfl_xor( x, 1, WARP_GPU_SIZE ) );
-  x = Max(x, __shfl_xor( x, 2, WARP_GPU_SIZE ) );
-  x = Max(x, __shfl_xor( x, 4, WARP_GPU_SIZE ) );
-  x = Max(x, __shfl_xor( x, 8, WARP_GPU_SIZE ) );
-  x = Max(x, __shfl_xor( x, 16, WARP_GPU_SIZE ) );
+  x = Max(x, gpu_shfl_xor(x, 1) );
+  x = Max(x, gpu_shfl_xor(x, 2) );
+  x = Max(x, gpu_shfl_xor(x, 4) );
+  x = Max(x, gpu_shfl_xor(x, 8) );
+  x = Max(x, gpu_shfl_xor(x, 16) );
 #if WARP_GPU_SIZE == 64
-  x = Max(x, __shfl_xor( x, 32, WARP_GPU_SIZE ) );
+  x = Max(x, gpu_shfl_xor(x, 32) );
 #endif
 #endif
   x_ = x;
@@ -734,7 +793,7 @@ void max_on_cg(T &x_) {
   const int myid = __cooperative_group__.thread_rank()+1;
   T x = x_;
   for(int lane=1; lane<tile_size; lane<<=1) {
-    x = Max(x, __cooperative_group__.shfl_xor(x, lane));
+    x = Max(x, cg_shfl_xor(__cooperative_group__, x, lane));
   }
   x_ = x;
 }
@@ -750,20 +809,20 @@ void min_on_warp(T &x_)
 {
   T x = x_;
 #if defined(__CUDA_ARCH__)
-  x = Min(x, __shfl_xor_sync( 0xffffffff, x, 1, WARP_GPU_SIZE ));
-  x = Min(x, __shfl_xor_sync( 0xffffffff, x, 2, WARP_GPU_SIZE ));
-  x = Min(x, __shfl_xor_sync( 0xffffffff, x, 4, WARP_GPU_SIZE ));
-  x = Min(x, __shfl_xor_sync( 0xffffffff, x, 8, WARP_GPU_SIZE ));
-  x = Min(x, __shfl_xor_sync( 0xffffffff, x, 16, WARP_GPU_SIZE ));
+  x = Min(x, gpu_shfl_xor(x, 1));
+  x = Min(x, gpu_shfl_xor(x, 2));
+  x = Min(x, gpu_shfl_xor(x, 4));
+  x = Min(x, gpu_shfl_xor(x, 8));
+  x = Min(x, gpu_shfl_xor(x, 16));
 #endif
 #if defined(__HIPCC__)
-  x = Min(x, __shfl_xor( x, 1, WARP_GPU_SIZE ) );
-  x = Min(x, __shfl_xor( x, 2, WARP_GPU_SIZE ) );
-  x = Min(x, __shfl_xor( x, 4, WARP_GPU_SIZE ) );
-  x = Min(x, __shfl_xor( x, 8, WARP_GPU_SIZE ) );
-  x = Min(x, __shfl_xor( x, 16, WARP_GPU_SIZE ) );
+  x = Min(x, gpu_shfl_xor(x, 1) );
+  x = Min(x, gpu_shfl_xor(x, 2) );
+  x = Min(x, gpu_shfl_xor(x, 4) );
+  x = Min(x, gpu_shfl_xor(x, 8) );
+  x = Min(x, gpu_shfl_xor(x, 16) );
 #if WARP_GPU_SIZE == 64
-  x = Min(x, __shfl_xor( x, 32, WARP_GPU_SIZE ) );
+  x = Min(x, gpu_shfl_xor(x, 32) );
 #endif
 #endif
   x_ = x;
@@ -780,7 +839,7 @@ void min_on_cg(T &x_) {
   const int myid = __cooperative_group__.thread_rank()+1;
   T x = x_;
   for(int lane=1; lane<tile_size; lane<<=1) {
-    x = Min(x, __cooperative_group__.shfl_xor(x, lane));
+    x = Min(x, cg_shfl_xor(__cooperative_group__, x, lane));
   }
   x_ = x;
 }
@@ -847,28 +906,28 @@ T red2_on_warp(const T x_, const T y_, const int pickup_lane)
   // y: y1 x2 y3 x4 ......
 
 #if defined(__CUDA_ARCH__)
-  x = y + __shfl_xor_sync( 0xffffffff, x, 1, WARP_GPU_SIZE );
+  x = y + gpu_shfl_xor(x, 1);
   // x: x12 y12 x34 y34 ......
-  x += __shfl_xor_sync( 0xffffffff, x, 2, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 2);
   // x: x1234 y1234 x1234 y1234 ......
-  x += __shfl_xor_sync( 0xffffffff, x, 4, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 4);
   // x: x12345678 y12345678 x12345678 y12345678 ......
-  x += __shfl_xor_sync( 0xffffffff, x, 8, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 8);
   // x: x1:16 y1:16 x1:16 y1:16 ......
-  x += __shfl_xor_sync( 0xffffffff, x, 16, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 16);
   // x: x1:32 y1:32 x1:32 y1:32 ......
-  x = __shfl_sync( 0xffffffff, x, pickup_lane, WARP_GPU_SIZE );
+  x = gpu_shfl(x, pickup_lane);
 #endif
 #if defined(__HIPCC__)
-  x = y + __shfl_xor( x,  1, WARP_GPU_SIZE );
-  x +=    __shfl_xor( x,  2, WARP_GPU_SIZE );
-  x +=    __shfl_xor( x,  4, WARP_GPU_SIZE );
-  x +=    __shfl_xor( x,  8, WARP_GPU_SIZE );
-  x +=    __shfl_xor( x, 16, WARP_GPU_SIZE );
+  x = y + gpu_shfl_xor(x, 1);
+  x +=    gpu_shfl_xor(x, 2);
+  x +=    gpu_shfl_xor(x, 4);
+  x +=    gpu_shfl_xor(x, 8);
+  x +=    gpu_shfl_xor(x, 16);
 #if WARP_GPU_SIZE == 64
-  x +=    __shfl_xor( x, 32, WARP_GPU_SIZE );
+  x +=    gpu_shfl_xor(x, 32);
 #endif
-  x = __shfl( x, pickup_lane, WARP_GPU_SIZE );
+  x = gpu_shfl(x, pickup_lane);
 #endif
 
   x = __MASK__( x, pickup_lane<=2 );
@@ -892,15 +951,15 @@ T red2_on_cg(const T x_, const T y_, const int pickup_lane) {
   __Cond_swap__(x, y, eee);
   // x: y1 x2 y3 x4
   // y: x1 y2 x3 y4
-  x = y + __cooperative_group__.shfl_xor(x, 1);
+  x = y + cg_shfl_xor(__cooperative_group__, x, 1);
   // x: x1+x2 y1+y2 x3+x4 y3+y4
   for(int lane=2; lane<tile_size; lane<<=1) { // tile_size = 4
-    x += __cooperative_group__.shfl_xor(x, lane);
+    x += cg_shfl_xor(__cooperative_group__, x, lane);
   // x: x1+x2+x3+x4 y1+y2+y3+y4 x1+x2+x3+x4 y1+y2+y3+y4
   }
   x = __MASK__( x, myid<=2 );
   // x: x1+x2+x3+x4 y1+y2+y3+y4 0 0
-  x = __cooperative_group__.shfl(x, pickup_lane);
+  x = cg_shfl(__cooperative_group__, x, pickup_lane);
   // choose : x1+x2+x3+x4 y1+y2+y3+y4 0 0 by index 'km'
   return x;
 }
@@ -924,24 +983,24 @@ void sum2_on_warp(T &x_, T &y_)
     x = t;
   }
 #if defined(__CUDA_ARCH__)
-  x = y + __shfl_xor_sync( 0xffffffff, x, 1, WARP_GPU_SIZE );
+  x = y + gpu_shfl_xor(x, 1);
 
-  x += __shfl_xor_sync( 0xffffffff, x, 2, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 4, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 8, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 16, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 2);
+  x += gpu_shfl_xor(x, 4);
+  x += gpu_shfl_xor(x, 8);
+  x += gpu_shfl_xor(x, 16);
 
-  y = __shfl_xor_sync( 0xffffffff, x, 1, WARP_GPU_SIZE );
+  y = gpu_shfl_xor(x, 1);
 #else
-  x = y + __shfl_xor( x, 1 , WARP_GPU_SIZE );
-  x +=    __shfl_xor( x, 2 , WARP_GPU_SIZE );
-  x +=    __shfl_xor( x, 4 , WARP_GPU_SIZE );
-  x +=    __shfl_xor( x, 8 , WARP_GPU_SIZE );
-  x +=    __shfl_xor( x, 16, WARP_GPU_SIZE );
+  x = y + gpu_shfl_xor(x, 1 );
+  x +=    gpu_shfl_xor(x, 2 );
+  x +=    gpu_shfl_xor(x, 4 );
+  x +=    gpu_shfl_xor(x, 8 );
+  x +=    gpu_shfl_xor(x, 16);
 #if WARP_GPU_SIZE == 64
-  x +=    __shfl_xor( x, 32, WARP_GPU_SIZE );
+  x +=    gpu_shfl_xor(x, 32);
 #endif
-  y = __shfl_xor( x, 1, WARP_GPU_SIZE );
+  y = gpu_shfl_xor(x, 1);
 #endif
   
   {
@@ -980,12 +1039,12 @@ void sum2_on_warp(float &x_, float &y_)
   "}"
   : "+f"(x), "+f"(y) );
 #if 0
-  z = w + __shfl_xor_sync( 0xffffffff, z, 1, WARP_GPU_SIZE );
-  z += __shfl_xor_sync( 0xffffffff, z, 2, WARP_GPU_SIZE );
-  z += __shfl_xor_sync( 0xffffffff, z, 4, WARP_GPU_SIZE );
-  z += __shfl_xor_sync( 0xffffffff, z, 8, WARP_GPU_SIZE );
-  z += __shfl_xor_sync( 0xffffffff, z, 16, WARP_GPU_SIZE );
-  w = __shfl_xor_sync( 0xffffffff, z, 1, WARP_GPU_SIZE );
+  z = w + gpu_shfl_xor(z, 1);
+  z += gpu_shfl_xor(z, 2);
+  z += gpu_shfl_xor(z, 4);
+  z += gpu_shfl_xor(z, 8);
+  z += gpu_shfl_xor(z, 16);
+  w = gpu_shfl_xor(z, 1);
 #endif
   __Cond_swap__(x, y, !eee);
 
@@ -1010,11 +1069,11 @@ void sum2_on_cg(T &x_, T &y_) {
     T x = x_; T y = y_;
     const bool eee = ((myid & 0x1) != 0);
     __Cond_swap__(x, y, eee);
-    x = y + __cooperative_group__.shfl_xor(x, 1);
+    x = y + cg_shfl_xor(__cooperative_group__, x, 1);
     for(int lane=2; lane<tile_size; lane<<=1) {
-      x += __cooperative_group__.shfl_xor(x, lane);
+      x += cg_shfl_xor(__cooperative_group__, x, lane);
     }
-    y = __cooperative_group__.shfl_xor(x, 1);
+    y = cg_shfl_xor(__cooperative_group__, x, 1);
     __Cond_swap__(x, y, !eee);
     x_ = x; y_ = y;
   }
@@ -1037,50 +1096,50 @@ void sum4_on_warp(T &x_, T &y_, T &z_, T &w_)
 #if defined(__CUDA_ARCH__)
   const bool eee = (threadIdx.x & 0x1);
   __Cond_swap__(x, y, eee);
-  x = y + __shfl_xor_sync( 0xffffffff, x, 1, WARP_GPU_SIZE );
+  x = y + gpu_shfl_xor(x, 1);
   __Cond_swap__(z, w, eee);
-  z = w + __shfl_xor_sync( 0xffffffff, z, 1, WARP_GPU_SIZE );
+  z = w + gpu_shfl_xor(z, 1);
 
   const bool fff = (threadIdx.x & 0x2);
   __Cond_swap__(x, z, fff);
-  x = z + __shfl_xor_sync( 0xffffffff, x, 2, WARP_GPU_SIZE );
+  x = z + gpu_shfl_xor(x, 2);
 
-  x += __shfl_xor_sync( 0xffffffff, x, 4, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 8, WARP_GPU_SIZE );
-  x += __shfl_xor_sync( 0xffffffff, x, 16, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 4);
+  x += gpu_shfl_xor(x, 8);
+  x += gpu_shfl_xor(x, 16);
 
-  z = __shfl_xor_sync( 0xffffffff, x, 2, WARP_GPU_SIZE );
+  z = gpu_shfl_xor(x, 2);
   __Cond_swap__(x, z, !fff);
 
-  y = __shfl_xor_sync( 0xffffffff, x, 1, WARP_GPU_SIZE );
+  y = gpu_shfl_xor(x, 1);
   __Cond_swap__(x, y, !eee);
-  w = __shfl_xor_sync( 0xffffffff, z, 1, WARP_GPU_SIZE );
+  w = gpu_shfl_xor(z, 1);
   __Cond_swap__(z, w, !eee);
 #endif
 #if defined(__HIPCC__)
   const bool eee = (threadIdx.x & 0x1);
   __Cond_swap__(x, y, eee);
-  x = y + __shfl_xor( x, 1, WARP_GPU_SIZE );
+  x = y + gpu_shfl_xor(x, 1);
   __Cond_swap__(z, w, eee);
-  z = w + __shfl_xor( z, 1, WARP_GPU_SIZE );
+  z = w + gpu_shfl_xor(z, 1);
 
   const bool fff = (threadIdx.x & 0x2);
   __Cond_swap__(x, z, fff);
-  x = z + __shfl_xor( x, 2, WARP_GPU_SIZE );
+  x = z + gpu_shfl_xor(x, 2);
 
-  x += __shfl_xor( x, 4, WARP_GPU_SIZE );
-  x += __shfl_xor( x, 8, WARP_GPU_SIZE );
-  x += __shfl_xor( x, 16, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 4);
+  x += gpu_shfl_xor(x, 8);
+  x += gpu_shfl_xor(x, 16);
 #if WARP_GPU_SIZE == 64
-  x += __shfl_xor( x, 32, WARP_GPU_SIZE );
+  x += gpu_shfl_xor(x, 32);
 #endif
 
-  z = __shfl_xor( x, 2, WARP_GPU_SIZE );
+  z = gpu_shfl_xor(x, 2);
   __Cond_swap__(x, z, !fff);
 
-  y = __shfl_xor( x, 1, WARP_GPU_SIZE );
+  y = gpu_shfl_xor(x, 1);
   __Cond_swap__(x, y, !eee);
-  w = __shfl_xor( z, 1, WARP_GPU_SIZE );
+  w = gpu_shfl_xor(z, 1);
   __Cond_swap__(z, w, !eee);
   
 #endif
@@ -1106,20 +1165,20 @@ void sum4_on_cg(T &x_, T &y_, T &z_, T &w_) {
     T x = x_; T y = y_; T z = z_; T w = w_;
     const bool eee = ((myid & 0x1) != 0);
     __Cond_swap__(x, y, eee);
-    x = y + __cooperative_group__.shfl_xor(x, 1);
+    x = y + cg_shfl_xor(__cooperative_group__, x, 1);
     __Cond_swap__(z, w, eee);
-    z = w + __cooperative_group__.shfl_xor(z, 1);
+    z = w + cg_shfl_xor(__cooperative_group__, z, 1);
     const bool fff = ((myid & 0x2) != 0);
     __Cond_swap__(x, z, fff);
-    x = z + __cooperative_group__.shfl_xor(x, 2);
+    x = z + cg_shfl_xor(__cooperative_group__, x, 2);
     for(int lane=4; lane<tile_size; lane<<=1) {
-      x += __cooperative_group__.shfl_xor(x, lane);
+      x += cg_shfl_xor(__cooperative_group__, x, lane);
     }
-    z = __cooperative_group__.shfl_xor(x, 2);
+    z = cg_shfl_xor(__cooperative_group__, x, 2);
     __Cond_swap__(x, z, !fff);
-    y = __cooperative_group__.shfl_xor(x, 1);
+    y = cg_shfl_xor(__cooperative_group__, x, 1);
     __Cond_swap__(x, y, !eee);
-    w = __cooperative_group__.shfl_xor(z, 1);
+    w = cg_shfl_xor(__cooperative_group__, z, 1);
     __Cond_swap__(w, z, !eee);
     x_ = x; y_ = y; z_ = z; w_ = w;
   }

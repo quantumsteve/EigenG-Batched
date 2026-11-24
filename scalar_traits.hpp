@@ -7,6 +7,7 @@
 //   real float/double          : TA == TR
 //   complex (Hermitian) matrix : TA = complex<TR>, TR = float/double
 //
+#include "complex_gpu.hpp"
 #if defined(__NVCC__)
 #include <cuComplex.h>
 #endif
@@ -18,6 +19,12 @@ template <class T>
 struct scalar_traits {
   typedef T real_type;
   static constexpr bool is_complex = false;
+};
+
+// device-side scalar used inside the kernels (see complex_gpu.hpp)
+template <class R> struct scalar_traits< gpu_complex<R> > {
+  typedef R real_type;
+  static constexpr bool is_complex = true;
 };
 
 #if defined(__NVCC__)
