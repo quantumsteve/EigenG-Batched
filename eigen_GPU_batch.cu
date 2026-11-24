@@ -35,19 +35,19 @@
 
 template <class T>
 __global__ void
-eigen_GPU_batch_n1_(const int L, const int nm, const int n, T *a_, T *w_)
+eigen_GPU_batch_n1_(const int L, const int nm, const int n, T *a_, real_t<T> *w_)
 {
   const int pos = threadIdx.x+blockIdx.x*blockDim.x;
   if (pos>=L) return;
 
   const size_t len = nm*n;
   T * a = a_ + pos*len;
-  T * w = w_ + pos;
+  real_t<T> * w = w_ + pos;
 
   const int step = blockDim.x*gridDim.x;
   #pragma unroll
   for (int id=pos; id<L; id+=step) {
-    *w = *a;
+    *w = real(*a);
     *a = static_cast<T>(1.0);
     a += len*step; w += n*step;
   }
@@ -55,8 +55,9 @@ eigen_GPU_batch_n1_(const int L, const int nm, const int n, T *a_, T *w_)
 
 template <class T, int tile_size>
 __global__ void
-eigen_GPU_batch_tiled_(const int L, const int nm, const int n, const int m, T *a_, T *w_, T *wk_, const int PRELOAD_SLOT)
+eigen_GPU_batch_tiled_(const int L, const int nm, const int n, const int m, T *a_, real_t<T> *w_, T *wk_, const int PRELOAD_SLOT)
 {
+  typedef real_t<T> TR;
   const size_t blks = (blockDim.x*gridDim.x)/tile_size;
   const size_t len  = (long)nm*n;
 
@@ -72,7 +73,11 @@ eigen_GPU_batch_tiled_(const int L, const int nm, const int n, const int m, T *a
   const int    step = 1;
 #endif
 
-  T * a, * w, * wk;
+  // per-matrix work size in units of T (== len for real T)
+  const size_t wlen = eigen_GPU_batch_wk_elems<T>(nm, n);
+
+  T * a, * wk;
+  TR * w;
 
 #if DO_PREFETCH
   a = a_ + pos*len;
@@ -87,7 +92,10 @@ eigen_GPU_batch_tiled_(const int L, const int nm, const int n, const int m, T *a
 
   a  = a_  + pos*len;
   w  = w_  + pos*m;
-  wk = wk_ + pos_*len;
+  wk = wk_ + pos_*wlen;
+  // real eigenvectors of the tridiagonal problem (Hermitian case: behind the
+  // complex Z; real case: Z itself)
+  TR * const yk = (TR *)(scalar_traits<T>::is_complex ? (wk + len) : wk);
 
   #pragma unroll 1
   for (int id_=0; id_<L_; id_+=step) {
@@ -121,10 +129,23 @@ eigen_GPU_batch_tiled_(const int L, const int nm, const int n, const int m, T *a
 #if USE_IMTQL
     if(run) return_flag = imtql2_tiled_<T, tile_size> (nm, n, w, wk);
 #else
-    if(run) return_flag = tql2_tiled_<T, tile_size> (nm, n, w, wk);
+    if(run) return_flag = tql2_tiled_<TR, tile_size, T> (nm, n, w, yk);
 #endif
 
     SYNC_IF_NEEDED();
+    if (scalar_traits<T>::is_complex) {
+      // Z := complex(y)
+      if(run) if ( !return_flag ) {
+        const int myid = threadIdx.x % tile_size + 1;
+        if (myid <= n) {
+          for (int j=0; j<n; j++) {
+            wk[(myid-1)+(size_t)j*nm] = static_cast<T>(yk[(myid-1)+(size_t)j*nm]);
+          }
+        }
+      }
+      SYNC_IF_NEEDED();
+    }
+
     if(run) if ( !return_flag ) hhtr2sy_tiled_<T, tile_size> (nm, n, a, wk);
 #else
     if(run) jac_tiled<T, tile_size> ( a, wk, nm, n, w );
@@ -245,9 +266,34 @@ eigen_GPU_batch_(const int L, const int nm, const int n, const int m, T *a_, T *
 }
 
 
+// n > WARP_GPU_SIZE: real only for now (hhsy2tr_/tql2_/hhtr2sy_ are not ported)
 template <class T>
 __host__ gpuError_t
-eigen_GPU_batch_RUN(const int L, const int nm, const int n, const int m, T * a, T * w, T * wk_, const gpuStream_t stream)
+eigen_GPU_batch_large_RUN(const int L, const int nm, const int n, const int m, T * a, T * w, T * wk_,
+                          const int numTB, const int numTH, const int numGR, const int sizeSH,
+                          const int PRELOAD_SLOT, const gpuStream_t stream, std::false_type)
+{
+    T *e = wk_;
+    T *wk = e + n*min(numTB*numGR,L);
+#if defined(__NVCC__)
+    cudaFuncSetAttribute( eigen_GPU_batch_ <T>,
+			cudaFuncAttributeMaxDynamicSharedMemorySize, 16*1024 );
+#endif
+    eigen_GPU_batch_ <T> <<<numTB, numTH, sizeSH, stream>>> (L, nm, n, m, a, w, e, wk, PRELOAD_SLOT);
+    return gpuSuccess;
+}
+template <class T>
+__host__ gpuError_t
+eigen_GPU_batch_large_RUN(const int, const int, const int, const int, T *, real_t<T> *, T *,
+                          const int, const int, const int, const int,
+                          const int, const gpuStream_t, std::true_type)
+{
+    return gpuErrorInvalidValue;
+}
+
+template <class T>
+__host__ gpuError_t
+eigen_GPU_batch_RUN(const int L, const int nm, const int n, const int m, T * a, real_t<T> * w, T * wk_, const gpuStream_t stream)
 {
   if (L<1||nm<n||n<1||m<1||m>n) return gpuErrorInvalidValue;
 
@@ -312,13 +358,8 @@ eigen_GPU_batch_RUN(const int L, const int nm, const int n, const int m, T * a, 
 #endif
     }
   } else {
-    T *e = wk_;
-    T *wk = e + n*min(numTB*numGR,L);
-#if defined(__NVCC__)
-    cudaFuncSetAttribute( eigen_GPU_batch_ <T>,
-			cudaFuncAttributeMaxDynamicSharedMemorySize, 16*1024 );
-#endif
-    eigen_GPU_batch_ <T> <<<numTB, numTH, sizeSH, stream>>> (L, nm, n, m, a, w, e, wk, PRELOAD_SLOT);
+    return eigen_GPU_batch_large_RUN<T>(L, nm, n, m, a, w, wk_, numTB, numTH, numGR, sizeSH,
+        PRELOAD_SLOT, stream, std::integral_constant<bool, scalar_traits<T>::is_complex>());
   }
 
   return gpuSuccess;
@@ -355,6 +396,40 @@ eigen_GPU_batch_FP(const int L, const int nm, const int n, const int m, float * 
     }
   } else {
     eigen_GPU_batch_RUN <float>(L, nm, n, m, a, w, wk, stream);
+  }
+}
+
+__host__ void
+eigen_GPU_batch_ZP(const int L, const int nm, const int n, const int m, gpuDoubleComplex * a, double * w, gpuDoubleComplex *wk, const gpuStream_t stream)
+{
+  typedef gpu_complex<double> T;
+  if ( wk == NULL ) {
+    if ( n > 1 ) {
+      size_t lwork;
+      eigen_GPU_batch_BufferSize <T>(L, nm, n, m, NULL, NULL, &lwork);
+      *((size_t *)w) = lwork;
+    } else {
+      *((int64_t *)w) = 0;
+    }
+  } else {
+    eigen_GPU_batch_RUN <T>(L, nm, n, m, (T *)a, w, (T *)wk, stream);
+  }
+}
+
+__host__ void
+eigen_GPU_batch_CP(const int L, const int nm, const int n, const int m, gpuFloatComplex * a, float * w, gpuFloatComplex *wk, const gpuStream_t stream)
+{
+  typedef gpu_complex<float> T;
+  if ( wk == NULL ) {
+    if ( n > 1 ) {
+      size_t lwork;
+      eigen_GPU_batch_BufferSize <T>(L, nm, n, m, NULL, NULL, &lwork);
+      *((size_t *)w) = lwork;
+    } else {
+      *((int32_t *)w) = 0;
+    }
+  } else {
+    eigen_GPU_batch_RUN <T>(L, nm, n, m, (T *)a, w, (T *)wk, stream);
   }
 }
 

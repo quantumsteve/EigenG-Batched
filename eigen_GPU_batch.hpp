@@ -102,6 +102,22 @@ eigen_GPU_batch_get_Launch_params(const int L, const int n, int &grpSZ_, int &nu
   return gpuSuccess;
 }
 
+//
+// Work elements (in units of TA) per matrix in the tiled kernel: the nm*n
+// matrix Z of type TA, plus, for complex TA, nm*n real eigenvectors of the
+// tridiagonal problem.
+//
+template <class TA>
+__host__ __device__ __forceinline__ size_t
+eigen_GPU_batch_wk_elems(const int nm, const int n)
+{
+  typedef real_t<TA> TR;
+  const size_t len = (size_t)nm*n;
+  const size_t extra = scalar_traits<TA>::is_complex ?
+                       (len*sizeof(TR)+sizeof(TA)-1)/sizeof(TA) : 0;
+  return len + extra;
+}
+
 template <class TA>
 __host__ gpuError_t
 eigen_GPU_batch_BufferSize(const int L, const int nm, const int n, const int m, TA * a, real_t<TA> * w, size_t *lwork)
@@ -112,8 +128,8 @@ eigen_GPU_batch_BufferSize(const int L, const int nm, const int n, const int m, 
   gpuError_t err_code = eigen_GPU_batch_get_Launch_params<TA>(L, n, grpSZ, numTB, numGR, numTH, sizeSH, sizeL2);
   if ( err_code != gpuSuccess ) return err_code;
 
-  // work buffer: n real values (e) + n*nm scalars of the matrix type
-  size_t elem = sizeof(real_t<TA>)*n + sizeof(TA)*((size_t)n*nm);
+  // work buffer: n real values (e) + the Z workspace
+  size_t elem = sizeof(real_t<TA>)*n + sizeof(TA)*eigen_GPU_batch_wk_elems<TA>(nm,n);
   size_t len  = elem*min(numTB*numGR,L);
   *lwork = len;
   return gpuSuccess;
@@ -152,6 +168,12 @@ eigen_GPU_batch(const int L, const int nm, const int n, const int m, TA * a, rea
   }
   if (std::is_same<TA,double>::value) {
     eigen_GPU_batch_DP(L, nm, n, m, (double*)a, (double*)w, (double*)wk, stream);
+  }
+  if (std::is_same<TA,gpuFloatComplex>::value) {
+    eigen_GPU_batch_CP(L, nm, n, m, (gpuFloatComplex*)a, (float*)w, (gpuFloatComplex*)wk, stream);
+  }
+  if (std::is_same<TA,gpuDoubleComplex>::value) {
+    eigen_GPU_batch_ZP(L, nm, n, m, (gpuDoubleComplex*)a, (double*)w, (gpuDoubleComplex*)wk, stream);
   }
 #if 0
   gpuSetDevice( current_device );

@@ -1,6 +1,8 @@
 #pragma once
 
-template <class T,int tile_size>
+// TS: scalar type that defines the shared-memory tile stride (see __SHMEM_AS__);
+// it is the matrix type when T is its real type.
+template <class T,int tile_size,class TS=T>
 __device__ __noinline__ int
 tql2_tiled_( const long nm, const int n,
                 T * __restrict__ w_, T * __restrict__ z_,
@@ -20,7 +22,7 @@ tql2_tiled_( const long nm, const int n,
   const T ZERO = static_cast<T>(0.0e0);
   const T ONE  = static_cast<T>(1.0e0);
 
-  T * shmem = __SHMEM__();
+  T * shmem = (T *)__SHMEM_AS__(TS);
 
   int ierror = 0;
   _if_ (n <= 1) { return ierror; }

@@ -10,6 +10,7 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
 #define a(row,col)      (*(a_+((row)-1)+((col)-1)*nm))
 #define z(row,col)      (*(z_+((row)-1)+((col)-1)*nm))
 
+  typedef real_t<T> TR;
   T * shmem = __SHMEM__();
 
   const T ZERO = static_cast<T>(0.0e0);
@@ -23,7 +24,8 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
     } sync_on_cg<T,tile_size>();
     return;
   }
-  _if_ (n == 2) {
+  // real case only: the Hermitian reduction has no n==2 shortcut (see tred1_tiled_)
+  _if_ (!scalar_traits<T>::is_complex && n == 2) {
     _if_ (myid <= n) {
       const T ei = a(2, 2);
       _if_ (ei != ZERO) {
@@ -52,14 +54,15 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
 
     const int myk = min(myid,n);
     const T a_xid = __MASK__( a(myk,i), eee );
-    const T reciprocal_ali_ei = Reciprocal(flip0to1(a(i,i)*a(l,i)));
+    // beta = 1/(e*conj(u_l)),  H = I + beta*u*u^H
+    const T reciprocal_ali_ei = Reciprocal(flip0to1(a(i,i)*conj(a(l,i))));
     const T b_xid = a_xid * reciprocal_ali_ei;
 
     T *zki_ptr = &z(myk,1);
     #pragma unroll 1
     for (int j=1; j<=n; j++) {
       T z_xid = __MASK__( *zki_ptr, eee );
-      T s = a_xid * z_xid;
+      T s = conj(a_xid) * z_xid;
       sum_on_cg<T,tile_size>(s);
       z_xid += s * b_xid;
       _if_ ( eee ) { *zki_ptr = z_xid; }
@@ -83,6 +86,16 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
     const int ll = i+(BLK_I-1)-1;
     const bool eee = (myid<=ll);
 
+    // Hermitian case: the reflectors are not Hermitian, so beta_I cannot be
+    // taken from G; it is 1/(e*conj(u_l)), read before e is zeroed below.
+    T beta_blk[BLK_I];
+    if (scalar_traits<T>::is_complex) {
+      for(int I=0;I<BLK_I;I++) {
+        beta_blk[I] = Reciprocal(flip0to1(a(i+I,i+I)*conj(a(i+I-1,i+I))));
+      }
+      sync_on_cg<T,tile_size>();
+    }
+
     _if_(myid==1){
     for(int I=0;I<BLK_I-1;I++) {
     for(int K=I;K<BLK_I-1;K++) {
@@ -95,7 +108,7 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
     for(int I=0;I<BLK_I;I++) {
       ai_myid[I] = eee ? a(myid, i+I): ZERO;
       for(int K=0;K<=I;K++) {
-        G[K][I] = ai_myid[K] * ai_myid[I];
+        G[K][I] = conj(ai_myid[K]) * ai_myid[I];
     }}
 #if 1
     { int I=0; int K=0; int IIKK=BLK_I*(BLK_I+1)/2;
@@ -117,7 +130,8 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
     }}
 #endif
     for(int I=0;I<BLK_I;I++) {
-      G[I][I] = Div(MTWO, flip0to1(G[I][I]));
+      if (scalar_traits<T>::is_complex) { G[I][I] = beta_blk[I]; }
+      else { G[I][I] = Div(MTWO, flip0to1(G[I][I])); }
     }
 
     const int jj=n % BLK_J;
@@ -130,7 +144,7 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
       {
         z_myid = zkj_ptr[0];
         for(int I=0;I<BLK_I;I++) {
-          s[I] = ai_myid[I] * z_myid;
+          s[I] = conj(ai_myid[I]) * z_myid;
         }
       }
 #if 1
@@ -150,7 +164,7 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
       {
         for(int I=0;I<BLK_I;I++) {
         for(int K=0;K<I;K++) {
-          s[I] += s[K]*G[K][I];
+          s[I] += s[K]*conj(G[K][I]);
         }
           s[I] *= G[I][I];
           z_myid += s[I] * ai_myid[I];
@@ -171,7 +185,7 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
 	}
         for(int J=0;J<BLK_J;J++) {
         for(int I=0;I<BLK_I;I++) {
-          s[I][J] = ai_myid[I] * z_myid[J];
+          s[I][J] = conj(ai_myid[I]) * z_myid[J];
         }}
       }
 #if 1
@@ -197,7 +211,7 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
         for(int J=0;J<BLK_J;J++) {
         for(int I=0;I<BLK_I;I++) {
         for(int K=0;K<I;K++) {
-          s[I][J] += s[K][J]*G[K][I];
+          s[I][J] += s[K][J]*conj(G[K][I]);
         }
           s[I][J] *= G[I][I];
           z_myid[J] += s[I][J] * ai_myid[I];
@@ -212,7 +226,7 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
 
 
   _if_ (myid <= n) {
-  int * pos_ = (int *)(shmem + tile_size);
+  int * pos_ = (int *)((TR *)shmem + tile_size);  // as in tql2_tiled_
   for(int i=1; i<=n; i++) {
     T * aa_ = &a(myid,i);
     const int col = do_sort ? pos(i) : i;
