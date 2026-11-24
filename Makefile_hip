@@ -54,6 +54,10 @@ eigen_GPU_batch.o: eigen_GPU_batch.cu
 eigen_GPU_check.o: eigen_GPU_check.cu
 	$(HIPCC) -c -o $@ $< $(HIPCCOPT)
 
+test_complex: a.out-complex
+a.out-complex: main_complex.cpp eigen_GPU_batch.o
+	$(HIPCC) -o $@ main_complex.cpp eigen_GPU_batch.o $(HIPCCOPT) -lm
+
 clean:
 	-\rm a.out a.out-* *.o *.cu_o *.ptx lib*.a
 
