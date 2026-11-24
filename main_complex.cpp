@@ -87,6 +87,8 @@ run_case(const int L, const int n, const Kind kind, const bool poison,
     for (int k=0; k<n; k++) {
     for (int j=0; j<nm; j++) {
       cd x = (j<n) ? A[id][j+(size_t)nm*k] : cd(0,0);
+      // the reference must be the matrix the GPU actually sees (rounded to R)
+      if (j<n) { x = cd((double)(R)x.real(), (double)(R)x.imag()); A[id][j+(size_t)nm*k] = x; }
       if (poison && j>k && j<n) x = cd(NaN, NaN);
       const size_t p = 2*((size_t)id*nm*n + j + (size_t)nm*k);
       a_h[p] = (R)x.real(); a_h[p+1] = (R)x.imag();
