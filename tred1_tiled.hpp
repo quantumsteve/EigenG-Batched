@@ -1,5 +1,15 @@
 #pragma once
 
+//
+// T is the matrix scalar type: float/double (real symmetric) or
+// gpu_complex<float/double> (complex Hermitian).  TR is the real type.
+//
+// Hermitian case: A := H^H A H with H = I + beta*u*u^H (complex beta, unitary,
+// not Hermitian), chosen so that the sub/super-diagonal e is REAL
+// (as zhetd2).  u is kept in a(1:l,i), e(i-1) in a(i,i), and beta is
+// recoverable as 1/(e(i-1)*conj(u(l))).  Q = H(n)...H(2).
+// For real T, conj/real/norm are identities and this is the original code.
+//
 template <class T, int tile_size>
 __device__  __noinline__ void
 //__device__  __forceinline__ void
@@ -13,30 +23,39 @@ tred1_tiled_(const int nm, const int n, T * __restrict__ a_)
 #define        d(index)        (*(d_+((index)-1)))
 #define        e(index)        (*(e_+((index)-1)))
 
+  typedef real_t<T> TR;
   T * shmem = __SHMEM__();
 
   const T ZERO = static_cast<T>(0.0e0);
   const T ONE  = static_cast<T>(1.0e0);
   const T MONE = static_cast<T>(-1.0e0);
 
-  T * const d_ = shmem;
-  T * const e_ = shmem + tile_size;
+  // d and e are real; they fit in the first tile_size elements of T.
+  TR * const d_ = (TR *)shmem;
+  TR * const e_ = d_ + tile_size;
 
   _if_ (n<=1) { return; }
-  _if_ (n==2) {
+  // The real case needs no reflector for n==2.  The Hermitian case does
+  // (it makes e real), so it goes through the general loop below.
+  _if_ (!scalar_traits<T>::is_complex && n==2) {
     _if_ (myid==1) {
-      d(1) = a(1,1);
-      d(2) = a(2,2);
-      e(1) = a(1,2);
-      e(2) = ZERO;
+      d(1) = real(a(1,1));
+      d(2) = real(a(2,2));
+      e(1) = real(a(1,2));
+      e(2) = static_cast<TR>(0);
     } sync_on_cg<T,tile_size>();
     return;
   }
 
 #define U_ON_SHMEM	1
 
+  // the diagonal of a Hermitian matrix is real
+  if (scalar_traits<T>::is_complex) {
+    _if_ (myid<=n) { zero_imag(a(myid,myid)); }
+    sync_on_cg<T,tile_size>();
+  }
 
-  T el = ZERO;
+  TR el = static_cast<TR>(0);
 
   #pragma unroll 1
   for (int i=n; i>=2; i--) {
@@ -53,10 +72,10 @@ tred1_tiled_(const int nm, const int n, T * __restrict__ a_)
 
 
     T beta; {
-      T anorm = u_myid * u_myid;
-      sum_on_cg<T,tile_size>(anorm);
-      const T ul = u_myid - (anorm = - Sign(Sqrt(anorm), u_myid));
-      beta = Reciprocal(flip0to1(ul * anorm));
+      TR anorm = norm(u_myid);
+      sum_on_cg<TR,tile_size>(anorm);
+      const T ul = u_myid - static_cast<T>(anorm = - Sign(Sqrt(anorm), real(u_myid)));
+      beta = Reciprocal(flip0to1(conj(ul) * static_cast<T>(anorm)));
       const bool eee = (myid == l);
       __UPDATE__(el, anorm, eee);
       __UPDATE__(u_myid, ul, eee);
@@ -132,7 +151,7 @@ tred1_tiled_(const int nm, const int n, T * __restrict__ a_)
        }
        */
       _if_ (lx1 != 0) {
-        const T vj = (*a_) * u_myid;
+        const T vj = static_cast<T>(real(*a_)) * u_myid;
         _if_ (myid==lx1) { v_myid = vj; }
       }
       // min(myid,nm) is added due to a guard for out-of-bound
@@ -148,8 +167,9 @@ tred1_tiled_(const int nm, const int n, T * __restrict__ a_)
         const T vj = (v_myid + ajk0 * u(k+0)) + ajk1 * u(k+1);
         __UPDATE__(v_myid, vj, km>=0); // k >= myid
         const bool fff = (km>=+1); // k >= myid+1
-        const T vk0 = __MASK__(ajk0 * u_myid, fff);
-        const T vk1 = ajk1 * u_myid;
+        // v(k) += conj(a(j,k)) * u(j)   (a(k,j) = conj(a(j,k)))
+        const T vk0 = __MASK__(conj(ajk0) * u_myid, fff);
+        const T vk1 = conj(ajk1) * u_myid;
 
 	// -km = myid - k -> { myid-(1+lx1), myid-(3+lx1), ... }
 	//  myid = {1+lx1, 2+lx1}, {3+lx1,4+lx1}, ...
@@ -171,7 +191,7 @@ tred1_tiled_(const int nm, const int n, T * __restrict__ a_)
 #endif
     {
       v_myid *= beta;
-      T alpha = v_myid * u_myid;
+      T alpha = conj(v_myid) * u_myid;
       sum_on_cg<T,tile_size>(alpha);
       alpha *= (beta * static_cast<T>(0.5));
       v_myid += alpha * u_myid;
@@ -184,20 +204,24 @@ tred1_tiled_(const int nm, const int n, T * __restrict__ a_)
       const int lx1 = (l & 0x1);
       _if_ (lx1) {
         T ajk = *ajk_ptr;
-        const T uj = u_myid + u_myid;
-        ajk += uj * v_myid;
+        ajk += u_myid * conj(v_myid);
+        ajk += v_myid * conj(u_myid);
+        zero_imag(ajk);
         _if_ (myid==lx1) { *ajk_ptr = ajk; }
         ajk_ptr += nm;
       }
       #pragma unroll 1
       for (int k=1+lx1; k<=l; k+=2) {
         T ajk0 = *(ajk_ptr);
-        ajk0 += u(k+0) * v_myid;
+        // a(j,k) += u(j)*conj(v(k)) + v(j)*conj(u(k)),  j = myid
+        ajk0 += u_myid * conj(v(k+0));
         T ajk1 = *(ajk_ptr+nm);
-        ajk1 += u(k+1) * v_myid;
-        ajk0 += v(k+0) * u_myid;
+        ajk1 += u_myid * conj(v(k+1));
+        ajk0 += v_myid * conj(u(k+0));
+        _if_ (myid==k+0) { zero_imag(ajk0); }
         _if_ (myid<=k+0) { *ajk_ptr = ajk0; } ajk_ptr += nm;
-        ajk1 += v(k+1) * u_myid;
+        ajk1 += v_myid * conj(u(k+1));
+        _if_ (myid==k+1) { zero_imag(ajk1); }
         _if_ (myid<=k+1) { *ajk_ptr = ajk1; } ajk_ptr += nm;
       }
     }
@@ -207,8 +231,9 @@ tred1_tiled_(const int nm, const int n, T * __restrict__ a_)
   _if_ (myid<=n) {
     const int j = (myid<n) ? myid+1 : 1;
     T * ajj_ptr = a_+(j-1)*(nm+1);
-    d(j) = *ajj_ptr;
-    e(myid) = *ajj_ptr = el;
+    d(j) = real(*ajj_ptr);
+    e(myid) = el;
+    *ajj_ptr = static_cast<T>(el);
   }
 
   // d and e are on shmem, they are passed to tql as well.

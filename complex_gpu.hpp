@@ -101,6 +101,12 @@ __host__ __device__ __forceinline__ double conj(const double x) { return x; }
 __host__ __device__ __forceinline__ float  norm(const float x)  { return x*x; }
 __host__ __device__ __forceinline__ double norm(const double x) { return x*x; }
 
+// force exact reality (Hermitian diagonal); no-op for real scalars
+template <class R> __host__ __device__ __forceinline__
+void zero_imag(gpu_complex<R> &x) { x.im = R(0); }
+__host__ __device__ __forceinline__ void zero_imag(float &)  {}
+__host__ __device__ __forceinline__ void zero_imag(double &) {}
+
 //
 // |z| (hypot-based: no overflow/underflow in re^2+im^2)
 //
