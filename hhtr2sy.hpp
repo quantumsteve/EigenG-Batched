@@ -22,7 +22,8 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
     } sync_on_warp();
     return;
   }
-  _if_ (n == 2) {
+  // real case only: the Hermitian reduction has no n==2 shortcut (see hhsy2tr_)
+  _if_ (!scalar_traits<T>::is_complex && n == 2) {
     _if_ (myid <= m) {
       const T ei = a(2, 2);
       _if_ (ei != ZERO) {
@@ -49,13 +50,14 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
   #pragma unroll 1
   for (int i=2; i<=ii; i++) {
     const int l = i - 1;
-    const T reciprocal_ali_ei = Reciprocal(flip0to1(a(i,i)*a(l,i)));
+    // beta = 1/(e*conj(u_l)),  H = I + beta*u*u^H
+    const T reciprocal_ali_ei = Reciprocal(flip0to1(a(i,i)*conj(a(l,i))));
 
     #pragma unroll 1
     for (int j=1; j<=m; j++) {
       T s = ZERO;
       for (int k=myid; k<=l; k+=WARP_GPU_SIZE) {
-        s += a(k, i) * z(k, j);
+        s += conj(a(k, i)) * z(k, j);
       } sum_on_warp(s);
       const T t = s * reciprocal_ali_ei;
       for (int k=myid; k<=l; k+=WARP_GPU_SIZE) {
@@ -67,6 +69,16 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
 
   #pragma unroll 1
   for (int i=ii+1; i<=n; i+=BLK_I) {
+    // Hermitian case: the reflectors are not Hermitian, so beta_I cannot be
+    // taken from G; it is 1/(e*conj(u_l)), read before e is zeroed below.
+    T beta_blk[BLK_I];
+    if (scalar_traits<T>::is_complex) {
+      for(int I=0;I<BLK_I;I++) {
+        beta_blk[I] = Reciprocal(flip0to1(a(i+I,i+I)*conj(a(i+I-1,i+I))));
+      }
+      sync_on_warp();
+    }
+
     _if_(myid==1){
     for(int I=0;I<BLK_I-1;I++) {
     for(int K=I;K<BLK_I-1;K++) {
@@ -86,7 +98,7 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
       }
       for(int I=0;I<BLK_I;I++) {
       for(int K=0;K<=I;K++) {
-        G[K][I] += aa[K] * aa[I];
+        G[K][I] += conj(aa[K]) * aa[I];
       }}
     }
 #if 1
@@ -109,7 +121,8 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
     }}
 #endif
     for(int I=0;I<BLK_I;I++) {
-      G[I][I]=Div(MTWO, flip0to1(G[I][I]));
+      if (scalar_traits<T>::is_complex) { G[I][I] = beta_blk[I]; }
+      else { G[I][I]=Div(MTWO, flip0to1(G[I][I])); }
     }
 
     #pragma unroll 1
@@ -118,7 +131,7 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
       for (int k=myid; k<=i+(BLK_I-1)-1; k+=WARP_GPU_SIZE) {
         T f0 = z(k,j+0);
         for(int I=0;I<BLK_I;I++) {
-          s[I] += a(k, i+I) * f0;
+          s[I] += conj(a(k, i+I)) * f0;
         }
       }{ int II=BLK_I%4;
         _if_(II&0x2) sum2_on_warp(s[0],s[1]);
@@ -128,7 +141,7 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
       }}
       for(int I=0;I<BLK_I;I++) {
       for(int K=0;K<I;K++) {
-        s[I] += s[K] * G[K][I];
+        s[I] += s[K] * conj(G[K][I]);
       }
         s[I] *= G[I][I];
       }
@@ -143,7 +156,7 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
     #pragma unroll 1
     for (int j=1+m%BLK_J; j<=m; j+=BLK_J) {
       T s[BLK_I][BLK_J]; for(int I=0; I<BLK_I; I++) {
-      for(int J=0; J<BLK_I; J++) { s[I][J] = ZERO; } }
+      for(int J=0; J<BLK_J; J++) { s[I][J] = ZERO; } }
       T * aki_ptr = &a(myid,i);
       T * zkj_ptr = &z(myid,j);
       for (int k=myid; k<=i+(BLK_I-1)-1; k+=WARP_GPU_SIZE) {
@@ -154,7 +167,7 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
         for(int J=0;J<BLK_J;J++) {
           const T ff = zkj_ptr[J*nm];
         for(int I=0;I<BLK_I;I++) {
-          s[I][J] += aa[I] * ff;
+          s[I][J] += conj(aa[I]) * ff;
         }} zkj_ptr+=WARP_GPU_SIZE;
       }
 #if 1
@@ -179,7 +192,7 @@ hhtr2sy_( const int nm, const int n, T * __restrict__ a_, const int m, T * __res
       for(int J=0;J<BLK_J;J++) {
       for(int I=0;I<BLK_I;I++) {
       for(int K=0;K<I;K++) {
-        s[I][J] += s[K][J] * G[K][I];
+        s[I][J] += s[K][J] * conj(G[K][I]);
       }
         s[I][J] *= G[I][I];
       }}

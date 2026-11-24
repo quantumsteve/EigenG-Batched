@@ -159,12 +159,15 @@ static int
 run_all(const char *name, const bool poison)
 {
   int nfail = 0;
-  const int L = 257;   // not a multiple of the group/block sizes
-  const int nums[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15, 16, 17, 24, 31, 32, 33, 48, 63, 64, 0 };
-  printf(">> %s complex Hermitian, batch=%d%s\n", name, L, poison ? ", NaN in lower triangle" : "");
+  // n <= WARP_GPU_SIZE: tiled kernel; above: one warp per matrix (non-tiled)
+  const int nums[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15, 16, 17, 24, 31, 32, 33, 48, 63, 64,
+                       65, 96, 100, 127, 128, 129, 200, 257, 0 };
+  printf(">> %s complex Hermitian%s\n", name, poison ? ", NaN in lower triangle" : "");
   for (int i=0; nums[i] > 0; i++) {
     const int n = nums[i];
-    if (n > WARP_GPU_SIZE) break;   // larger sizes are not supported for complex yet
+    // batch size not a multiple of the group/block sizes; smaller for large n
+    // (the host verification is O(n^3) per matrix)
+    const int L = (n <= 64) ? 257 : ((n <= 130) ? 65 : 17);
     for (int k=0; k<NUM_KINDS; k++) {
       double resid, orth;
       const bool ok = run_case<R>(L, n, (Kind)k, poison, resid, orth);

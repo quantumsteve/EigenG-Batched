@@ -131,6 +131,8 @@ eigen_GPU_batch_BufferSize(const int L, const int nm, const int n, const int m, 
   // work buffer: n real values (e) + the Z workspace
   size_t elem = sizeof(real_t<TA>)*n + sizeof(TA)*eigen_GPU_batch_wk_elems<TA>(nm,n);
   size_t len  = elem*min(numTB*numGR,L);
+  // complex: slack for aligning wk behind the real e array (large-n path)
+  if (scalar_traits<TA>::is_complex) len += sizeof(TA);
   *lwork = len;
   return gpuSuccess;
 }

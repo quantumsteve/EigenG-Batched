@@ -42,7 +42,7 @@ eigen_GPU_batch_FP(const int L, const int nm, const int n, const int m, float * 
 
 //
 // Complex Hermitian (upper triangle of a is referenced).  w holds real
-// eigenvalues.  Only n <= WARP_GPU_SIZE is supported for now.
+// eigenvalues.
 // wk == NULL query works as above, with ((size_t)w)[0] as the result.
 //
 void
