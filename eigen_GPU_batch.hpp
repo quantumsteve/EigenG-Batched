@@ -17,10 +17,11 @@
 
 #include "gpu_arch.h"
 #include "eigen_GPU_batch.h"
+#include "scalar_traits.hpp"
 
 
 
-template <class T>
+template <class TA>
 __host__ gpuError_t
 eigen_GPU_batch_get_Launch_params(const int L, const int n, int &grpSZ_, int &numTB_, int &numGR_, int &numTH_, int &sizeSH_, int &sizeL2_)
 {
@@ -73,7 +74,7 @@ eigen_GPU_batch_get_Launch_params(const int L, const int n, int &grpSZ_, int &nu
   const int numGR = numTH/grpSZ;
 
   // The required shared memory size per ThreadBlock
-  const int sizeSH = sizeof(T)*numTH*2;
+  const int sizeSH = sizeof(TA)*numTH*2;
 
   // These parameter controlls assignment of threads and batches, statically.
   // Therefore, if numGR*numTB >> L, some CUDA cores are idling, and
@@ -101,25 +102,26 @@ eigen_GPU_batch_get_Launch_params(const int L, const int n, int &grpSZ_, int &nu
   return gpuSuccess;
 }
 
-template <class T>
+template <class TA>
 __host__ gpuError_t
-eigen_GPU_batch_BufferSize(const int L, const int nm, const int n, const int m, T * a, T * w, size_t *lwork)
+eigen_GPU_batch_BufferSize(const int L, const int nm, const int n, const int m, TA * a, real_t<TA> * w, size_t *lwork)
 {
   *lwork = 0;
   if (L<1||nm<n||n<1||m<1||m>n) return gpuErrorInvalidValue;
   int grpSZ=0, numTB=0, numGR=0, numTH=0, sizeSH=0, sizeL2=0;
-  gpuError_t err_code = eigen_GPU_batch_get_Launch_params<T>(L, n, grpSZ, numTB, numGR, numTH, sizeSH, sizeL2);
+  gpuError_t err_code = eigen_GPU_batch_get_Launch_params<TA>(L, n, grpSZ, numTB, numGR, numTH, sizeSH, sizeL2);
   if ( err_code != gpuSuccess ) return err_code;
 
-  size_t elem = sizeof(T)*(n+(n*nm));
+  // work buffer: n real values (e) + n*nm scalars of the matrix type
+  size_t elem = sizeof(real_t<TA>)*n + sizeof(TA)*((size_t)n*nm);
   size_t len  = elem*min(numTB*numGR,L);
   *lwork = len;
   return gpuSuccess;
 }
 
-template <class T>
+template <class TA>
 __host__ void
-eigen_GPU_batch(const int L, const int nm, const int n, const int m, T * a, T * w, T * wk, const gpuStream_t stream=NULL)
+eigen_GPU_batch(const int L, const int nm, const int n, const int m, TA * a, real_t<TA> * w, TA * wk, const gpuStream_t stream=NULL)
 {
 #if 0
   int current_device;
@@ -145,10 +147,10 @@ eigen_GPU_batch(const int L, const int nm, const int n, const int m, T * a, T * 
 //  if (std::is_same<T,half>::value) {
 //    ;
 //  }
-  if (std::is_same<T,float>::value) {
+  if (std::is_same<TA,float>::value) {
     eigen_GPU_batch_FP(L, nm, n, m, (float*)a, (float*)w, (float*)wk, stream);
   }
-  if (std::is_same<T,double>::value) {
+  if (std::is_same<TA,double>::value) {
     eigen_GPU_batch_DP(L, nm, n, m, (double*)a, (double*)w, (double*)wk, stream);
   }
 #if 0
