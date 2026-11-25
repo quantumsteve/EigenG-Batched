@@ -159,6 +159,13 @@ EigenG-Batched
   CUDA devices yet.  Note the QL tolerance is 512 eps in double and 16 eps
   in float, so double results show larger values in these units for small N.
 
+  Speed:  './a.out-complex bench [iterations [max_batch [budget_GiB]]]'
+  (defaults 20, 16384, 6) times the real symmetric and the complex Hermitian
+  solver on the same N, batch and precision, and prints the time ratio and
+  GF/s and GB/s of the complex one.  The batch is reduced for large N so
+  that the input and its saved copy fit in budget_GiB.  Complex flops are
+  counted as 4x the real count of main.cpp (L*N^3*(4/3+2)).
+
 
 
 2. Main file Structure:

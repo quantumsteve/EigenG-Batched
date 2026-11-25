@@ -12,6 +12,9 @@
 // usage: ./a.out-complex [poison]
 //   poison: fill the strictly lower triangle of the input with NaN to verify
 //           that only the upper triangle is referenced.
+//        ./a.out-complex bench [iterations [max_batch [budget_GiB]]]
+//   bench:  times the complex Hermitian solver against the real symmetric
+//           solver on the same N, batch size and precision (see bench_all).
 //
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +23,8 @@
 #include <random>
 #include <vector>
 #include <limits>
+#include <chrono>
+#include <stdlib.h>
 
 #if defined(__NVCC__)
 #include <cuda.h>
@@ -178,9 +183,139 @@ run_all(const char *name, const bool poison)
   return nfail;
 }
 
+// ---------------------------------------------------------------------------
+// Speed benchmark
+// ---------------------------------------------------------------------------
+template <class T> struct Elem;
+template <> struct Elem<float>            { typedef float  R; static const int NC = 1; };
+template <> struct Elem<double>           { typedef double R; static const int NC = 1; };
+template <> struct Elem<gpuFloatComplex>  { typedef float  R; static const int NC = 2; };
+template <> struct Elem<gpuDoubleComplex> { typedef double R; static const int NC = 2; };
+
+// nsample random Hermitian (symmetric for real T) matrices, column major,
+// leading dimension nm, as NC interleaved components per element.
+template <class T>
+static std::vector<typename Elem<T>::R>
+make_sample(const int nm, const int n, const int nsample)
+{
+  typedef typename Elem<T>::R R;
+  const int NC = Elem<T>::NC;
+  std::mt19937 gen(2024u + n);
+  std::uniform_real_distribution<double> U(-1.0, 1.0);
+  std::vector<R> s((size_t)nsample*nm*n*NC, (R)0);
+  for (int id=0; id<nsample; id++) {
+    R *a = &s[(size_t)id*nm*n*NC];
+    for (int k=0; k<n; k++) {
+      a[NC*(k+(size_t)nm*k)] = (R)U(gen);
+      for (int j=0; j<k; j++) {
+        const double re = U(gen), im = (NC==2) ? U(gen) : 0.0;
+        a[NC*(j+(size_t)nm*k)] = (R)re;  if (NC==2) a[NC*(j+(size_t)nm*k)+1] = (R)im;
+        a[NC*(k+(size_t)nm*j)] = (R)re;  if (NC==2) a[NC*(k+(size_t)nm*j)+1] = (R)-im;
+      }
+    }
+  }
+  return s;
+}
+
+// average seconds of one eigen_GPU_batch call (input restored, untimed, before
+// each call); returns a negative value if memory could not be allocated.
+template <class T>
+static double
+time_solver(const int L, const int n, const int iters)
+{
+  typedef typename Elem<T>::R R;
+  const int nm = n + (n&0x1), m = n;
+  const int ns = (L < 32) ? L : 32;
+  std::vector<R> sample = make_sample<T>(nm, n, ns);
+
+  T *a_d = NULL, *b_d = NULL, *wk_d = NULL; R *w_d = NULL;
+  const size_t lena = sizeof(T)*(size_t)L*nm*n, lenw = sizeof(R)*(size_t)L*m;
+  size_t lenwk = 0;
+  bool ok = (gpuMalloc((void**)&a_d, lena) == gpuSuccess) &&
+            (gpuMalloc((void**)&b_d, lena) == gpuSuccess) &&
+            (gpuMalloc((void**)&w_d, lenw) == gpuSuccess) &&
+            (eigen_GPU_batch_BufferSize<T>(L, nm, n, m, a_d, w_d, &lenwk) == gpuSuccess) &&
+            (gpuMalloc((void**)&wk_d, lenwk) == gpuSuccess);
+  double sec = -1;
+  if (ok) {
+    for (int c=0; c<L; c+=ns) {          // replicate the sample over the batch
+      const int cnt = (L-c < ns) ? (L-c) : ns;
+      gpuMemcpy(b_d + (size_t)c*nm*n, sample.data(), sizeof(T)*(size_t)cnt*nm*n, gpuMemcpyHostToDevice);
+    }
+    gpuStream_t stream;
+    gpuStreamCreate(&stream);
+    double total = 0;
+    for (int it=-1; it<iters; it++) {    // it=-1: warm-up
+      gpuMemcpy(a_d, b_d, lena, gpuMemcpyDeviceToDevice);
+      gpuDeviceSynchronize();
+      const auto t0 = std::chrono::steady_clock::now();
+      eigen_GPU_batch<T>(L, nm, n, m, a_d, w_d, wk_d, stream);
+      gpuDeviceSynchronize();
+      const auto t1 = std::chrono::steady_clock::now();
+      if (it >= 0) total += std::chrono::duration<double>(t1-t0).count();
+    }
+    gpuStreamDestroy(stream);
+    sec = total/iters;
+  }
+  if (a_d) gpuFree(a_d);
+  if (b_d) gpuFree(b_d);
+  if (w_d) gpuFree(w_d);
+  if (wk_d) gpuFree(wk_d);
+  return sec;
+}
+
+//
+// Real symmetric vs complex Hermitian, same N, batch and precision.
+// Flops use the formula of main.cpp, L*n^3*(4/3+2), for the real solver and 4x
+// that for the complex one (a complex multiply-add is 8 real flops, a real one 2).
+// GB/s uses the same traffic formula with sizeof(element).
+//
+template <class TR, class TC>
+static void
+bench_precision(const char *name, const int iters, const int Lmax, const double budget_bytes)
+{
+  const int nums[] = { 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 321, 0 };
+  printf(">> %s: real symmetric vs complex Hermitian, average of %d iterations\n", name, iters);
+  printf("   %5s %7s %12s %12s %9s %12s %12s\n",
+         "N", "batch", "real[ms]", "complex[ms]", "cplx/real", "cplx[GF/s]", "cplx[GB/s]");
+  for (int i=0; nums[i] > 0; i++) {
+    const int n = nums[i], nm = n + (n&0x1);
+    // a and its saved copy dominate the memory; the work buffer is bounded
+    // by the number of resident blocks
+    int L = (int)(budget_bytes / (2.0*sizeof(TC)*nm*n));
+    if (L > Lmax) L = Lmax;
+    if (L < 1) L = 1;
+    const double tr = time_solver<TR>(L, n, iters);
+    const double tc = time_solver<TC>(L, n, iters);
+    if (tr < 0 || tc < 0) { printf("   %5d %7d  (out of memory)\n", n, L); continue; }
+    const double flop = 4.0 * L*(double)n*n*n*(4./3+2);
+    const double data = sizeof(TC)*L*(double)n*((n/2.+2.+n/2.+n) + (n/2.+2.+n+1.+n));
+    printf("   %5d %7d %12.4e %12.4e %9.2f %12.4e %12.4e\n",
+           n, L, 1e3*tr, 1e3*tc, tc/tr, 1e-9*flop/tc, 1e-9*data/tc);
+    fflush(stdout);
+  }
+  printf("\n");
+}
+
+static void
+bench_all(const int iters, const int Lmax, const double budget_GiB)
+{
+  const double budget = budget_GiB*1024.0*1024.0*1024.0;
+  bench_precision<float,  gpuFloatComplex >("float",  iters, Lmax, budget);
+  bench_precision<double, gpuDoubleComplex>("double", iters, Lmax, budget);
+}
+
 int
 main(int argc, char **argv)
 {
+  if (argc > 1 && strcmp(argv[1], "bench") == 0) {
+    const int iters      = (argc > 2) ? atoi(argv[2]) : 20;
+    const int Lmax       = (argc > 3) ? atoi(argv[3]) : 16384;
+    const double budget  = (argc > 4) ? atof(argv[4]) : 6.0;
+    gpuSetDevice(0);
+    bench_all(iters > 0 ? iters : 1, Lmax > 0 ? Lmax : 1, budget);
+    return 0;
+  }
   const bool poison = (argc > 1 && strcmp(argv[1], "poison") == 0);
   gpuSetDevice(0);
   int nfail = 0;
