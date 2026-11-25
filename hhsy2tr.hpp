@@ -213,14 +213,32 @@ hhsy2tr_(const int nm, const int n, T * __restrict__ a_, real_t<T> * __restrict_
     {
     const int i2 = i0 + m1 - 1;
     const int mm = m0 - m1 + 1;
-    const int BLK_J = 3;
-//    const int BLK_J = 4;
-    const int BLK_K = 3;
-//    const int BLK_K = 4;
-//    const int BLK_M = 2;
-//    const int BLK_M = 3;
-    const int BLK_M = 4;
-//    const int BLK_M = 8;
+    const int BLK_J0 = 3;
+//    const int BLK_J0 = 4;
+    const int BLK_K0 = 3;
+//    const int BLK_K0 = 4;
+//    const int BLK_M0 = 2;
+//    const int BLK_M0 = 3;
+    const int BLK_M0 = 4;
+//    const int BLK_M0 = 8;
+    // Tuning switches (off by default): the ajk/uj/uk/vj/vk blocks hold
+    // complex values, twice the registers.  -DEIGENG_CPLX_BLK_{J,K,M}=<n>
+    // override the block sizes for complex T only.
+#if defined(EIGENG_CPLX_BLK_J)
+    const int BLK_J = scalar_traits<T>::is_complex ? (EIGENG_CPLX_BLK_J) : BLK_J0;
+#else
+    const int BLK_J = BLK_J0;
+#endif
+#if defined(EIGENG_CPLX_BLK_K)
+    const int BLK_K = scalar_traits<T>::is_complex ? (EIGENG_CPLX_BLK_K) : BLK_K0;
+#else
+    const int BLK_K = BLK_K0;
+#endif
+#if defined(EIGENG_CPLX_BLK_M)
+    const int BLK_M = scalar_traits<T>::is_complex ? (EIGENG_CPLX_BLK_M) : BLK_M0;
+#else
+    const int BLK_M = BLK_M0;
+#endif
 #pragma unroll 1
     for(int k0=1; k0<=i2; k0+=YDIM*BLK_K) { int k=k0+BLK_K*(yid-1);
 #pragma unroll 1
