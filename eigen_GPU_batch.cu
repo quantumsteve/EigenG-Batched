@@ -33,6 +33,19 @@
 
 
 
+//
+// Tuning switch (off by default, no change in behaviour): compile with
+// -DEIGENG_LAUNCH_BOUNDS=<threads> to put __launch_bounds__ on the batch
+// kernels.  <threads> must be >= the launch size, WARP_GPU_SIZE*8.
+// The default bound is the device maximum (1024), which limits the register
+// budget per thread; a tighter bound lets the compiler use more registers.
+//
+#if defined(EIGENG_LAUNCH_BOUNDS)
+#define EIGENG_LB __launch_bounds__(EIGENG_LAUNCH_BOUNDS)
+#else
+#define EIGENG_LB
+#endif
+
 template <class T>
 __global__ void
 eigen_GPU_batch_n1_(const int L, const int nm, const int n, T *a_, real_t<T> *w_)
@@ -54,7 +67,7 @@ eigen_GPU_batch_n1_(const int L, const int nm, const int n, T *a_, real_t<T> *w_
 }
 
 template <class T, int tile_size>
-__global__ void
+__global__ void EIGENG_LB
 eigen_GPU_batch_tiled_(const int L, const int nm, const int n, const int m, T *a_, real_t<T> *w_, T *wk_, const int PRELOAD_SLOT)
 {
   typedef real_t<T> TR;
@@ -157,7 +170,7 @@ eigen_GPU_batch_tiled_(const int L, const int nm, const int n, const int m, T *a
 
 
 template <class T>
-__global__ void
+__global__ void EIGENG_LB
 eigen_GPU_batch_(const int L, const int nm, const int n, const int m, T *a_, real_t<T> *w_, real_t<T> *e_, T * wk_, const int PRELOAD_SLOT)
 {
   typedef real_t<T> TR;
@@ -317,6 +330,9 @@ eigen_GPU_batch_RUN(const int L, const int nm, const int n, const int m, T * a, 
   int grpSZ=0, numTB=0, numGR=0, numTH=0, sizeSH=0, sizeL2=0;
   err_code = eigen_GPU_batch_get_Launch_params<T>(L, n, grpSZ, numTB, numGR, numTH, sizeSH, sizeL2);
   if (err_code != gpuSuccess) return err_code;
+#if defined(EIGENG_LAUNCH_BOUNDS)
+  if (numTH > EIGENG_LAUNCH_BOUNDS) return gpuErrorInvalidValue;
+#endif
 
 #if DO_PREFETCH
   const int len = nm*n;

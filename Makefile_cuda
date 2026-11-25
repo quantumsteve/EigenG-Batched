@@ -55,6 +55,9 @@ NVCCOPTmin=\
 		--no-compress \
 		--prec-div=true --prec-sqrt=true --fmad=true
 
+# extra flags for experiments, e.g. make EXTRA_OPT="-DEIGENG_LAUNCH_BOUNDS=256"
+NVCCOPT:= $(NVCCOPT) $(EXTRA_OPT)
+
 OBJS = main.o eigen_GPU_check.o
 OBJSS = $(OBJS) eigen_GPU_batch.o
 LIBS = libeigenGbatch.a

@@ -38,11 +38,24 @@ hhtr2sy_tiled_( const long nm, const int n, T * __restrict__ a_, T * __restrict_
 
 
 #if defined(__HIPCC__)
-  const int BLK_I = (tile_size>=16)?3:((tile_size>=8)?3:2);
-  const int BLK_J = (tile_size>=16)?4:((tile_size>=8)?3:2);
+  const int BLK_I0 = (tile_size>=16)?3:((tile_size>=8)?3:2);
+  const int BLK_J0 = (tile_size>=16)?4:((tile_size>=8)?3:2);
 #else
-  const int BLK_I = (tile_size>=16)?3:((tile_size>=8)?3:2);
-  const int BLK_J = (tile_size>=16)?4:((tile_size>=8)?3:2);
+  const int BLK_I0 = (tile_size>=16)?3:((tile_size>=8)?3:2);
+  const int BLK_J0 = (tile_size>=16)?4:((tile_size>=8)?3:2);
+#endif
+  // Tuning switches (off by default): complex values double the register
+  // footprint of the G/s/z blocks, so -DEIGENG_CPLX_BLK_I=<n> and
+  // -DEIGENG_CPLX_BLK_J=<n> override the block sizes for complex T only.
+#if defined(EIGENG_CPLX_BLK_I)
+  const int BLK_I = scalar_traits<T>::is_complex ? (EIGENG_CPLX_BLK_I) : BLK_I0;
+#else
+  const int BLK_I = BLK_I0;
+#endif
+#if defined(EIGENG_CPLX_BLK_J)
+  const int BLK_J = scalar_traits<T>::is_complex ? (EIGENG_CPLX_BLK_J) : BLK_J0;
+#else
+  const int BLK_J = BLK_J0;
 #endif
   const int ii = (n-1) % BLK_I + 1;
 

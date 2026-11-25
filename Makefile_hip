@@ -33,6 +33,9 @@ HIPCCOPT:= $(HIPCCOPT) \
 		--offload-arch=gfx1100,gfx1101,gfx1102,gfx1103 -D__GFX11__
 
 
+# extra flags for experiments, e.g. make EXTRA_OPT="-DEIGENG_LAUNCH_BOUNDS=512"
+HIPCCOPT:= $(HIPCCOPT) $(EXTRA_OPT)
+
 OBJS = main.o eigen_GPU_check.o
 OBJSS = $(OBJS) eigen_GPU_batch.o
 LIBS = libeigenGbatch.a
