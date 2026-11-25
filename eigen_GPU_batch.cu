@@ -47,8 +47,12 @@
 //   -DEIGENG_LAUNCH_BOUNDS=<threads>  force the bound on ALL types (experiments;
 //                                     must be >= WARP_GPU_SIZE*8)
 //   -DEIGENG_NO_CPLX_LB               HIP: no bound for complex double either
+//   -DEIGENG_NO_LB                    no __launch_bounds__ attribute on any kernel
+//                                     (the code generation before these switches)
 //
-#if defined(EIGENG_LAUNCH_BOUNDS)
+#if defined(EIGENG_NO_LB)
+// no attribute at all
+#elif defined(EIGENG_LAUNCH_BOUNDS)
 #define EIGENG_LB_ON 1
 template <class T> struct eigen_lb { static constexpr int value = EIGENG_LAUNCH_BOUNDS; };
 #elif (defined(__HIPCC__) || defined(EIGENG_PER_TYPE_LB)) && !defined(EIGENG_NO_CPLX_LB)
