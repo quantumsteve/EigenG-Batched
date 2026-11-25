@@ -34,14 +34,30 @@
 
 
 //
-// Tuning switch (off by default, no change in behaviour): compile with
-// -DEIGENG_LAUNCH_BOUNDS=<threads> to put __launch_bounds__ on the batch
-// kernels.  <threads> must be >= the launch size, WARP_GPU_SIZE*8.
-// The default bound is the device maximum (1024), which limits the register
-// budget per thread; a tighter bound lets the compiler use more registers.
+// Launch bounds.  The default bound is the device maximum (1024 threads),
+// which on AMD caps a kernel at 128 registers per thread (VGPR+AGPR, occupancy
+// 4).  The batch kernels launch only WARP_GPU_SIZE*8 threads, so a tighter
+// bound lets the compiler use up to 256 registers, at occupancy 2.
+//
+// Measured on MI100: complex double spills heavily at the default (scratch
+// 350-1100 bytes/lane) and runs 1.3-1.6x faster with the tighter bound, while
+// real float/double and complex float lose up to 40% at some sizes (their
+// kernels did not spill, so occupancy 2 only costs).  Hence the bound is set
+// per scalar type and, by default, only for complex double on HIP.
+//   -DEIGENG_LAUNCH_BOUNDS=<threads>  force the bound on ALL types (experiments;
+//                                     must be >= WARP_GPU_SIZE*8)
+//   -DEIGENG_NO_CPLX_LB               HIP: no bound for complex double either
 //
 #if defined(EIGENG_LAUNCH_BOUNDS)
-#define EIGENG_LB __launch_bounds__(EIGENG_LAUNCH_BOUNDS)
+#define EIGENG_LB_ON 1
+template <class T> struct eigen_lb { static constexpr int value = EIGENG_LAUNCH_BOUNDS; };
+#elif (defined(__HIPCC__) || defined(EIGENG_PER_TYPE_LB)) && !defined(EIGENG_NO_CPLX_LB)
+#define EIGENG_LB_ON 1
+template <class T> struct eigen_lb { static constexpr int value = 1024; };   // = default
+template <> struct eigen_lb< gpu_complex<double> > { static constexpr int value = WARP_GPU_SIZE*8; };
+#endif
+#if defined(EIGENG_LB_ON)
+#define EIGENG_LB __launch_bounds__(eigen_lb<T>::value)
 #else
 #define EIGENG_LB
 #endif
@@ -330,8 +346,8 @@ eigen_GPU_batch_RUN(const int L, const int nm, const int n, const int m, T * a, 
   int grpSZ=0, numTB=0, numGR=0, numTH=0, sizeSH=0, sizeL2=0;
   err_code = eigen_GPU_batch_get_Launch_params<T>(L, n, grpSZ, numTB, numGR, numTH, sizeSH, sizeL2);
   if (err_code != gpuSuccess) return err_code;
-#if defined(EIGENG_LAUNCH_BOUNDS)
-  if (numTH > EIGENG_LAUNCH_BOUNDS) return gpuErrorInvalidValue;
+#if defined(EIGENG_LB_ON)
+  if (numTH > eigen_lb<T>::value) return gpuErrorInvalidValue;
 #endif
 
 #if DO_PREFETCH
