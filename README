@@ -2,6 +2,11 @@
 EigenG-Batched
 
 0. Revision Histrory
+  Unreleased (2026.11.24) ::
+    Complex Hermitian matrices are supported (eigen_GPU_batch_ZP/_CP, and
+    eigen_GPU_batch<cuDoubleComplex/cuComplex> or the hip equivalents),
+    for any N.  See section 1b.  Real (float/double) behaviour is unchanged.
+
   Version 1.6.2 (2025.02.01) ::
     CUDA 12.8 support, and some tweaks of source-codes
 
@@ -89,11 +94,80 @@ EigenG-Batched
   
 
 
+1b. Complex Hermitian matrices
+  Computes all eigenpairs of a batch of complex Hermitian matrices,
+  A v = w v, with real eigenvalues w.
+
+  Interface (same conventions as the real routines):
+    L   number of matrices in the batch
+    nm  leading dimension of each matrix (column major), nm >= n
+    n   matrix size, m = n (all eigenpairs)
+    a   L matrices, each nm x n complex.  Only the UPPER triangle is
+        referenced; the strictly lower triangle is never read, and the
+        imaginary part of the diagonal is ignored.
+        On exit the columns of a are the orthonormal eigenvectors.
+    w   L x m real eigenvalues (float for _CP, double for _ZP), ascending
+        if DO_SORT is 1 (the default in eigen_GPU_batch.cu).
+    wk  working buffer; get its size as for the real routines.
+        It is larger than the real one: it also holds the real
+        eigenvectors of the tridiagonal problem.
+
+  ** In the case of C++,
+  #include "eigen_GPU_batch.hpp"
+  void foo(...){
+    gpuDoubleComplex *a, *work;   // cuDoubleComplex / hipDoubleComplex
+    double *w;
+    size_t lwork;
+    ...
+    eigen_GPU_batch_BufferSize (L, nm, n, m, a, w, &lwork);
+    cudaMalloc(&work, lwork);
+    ...
+    eigen_GPU_batch (L, nm, n, m, a, w, work, stream);
+    ...
+  }
+
+  ** In the case of C,
+  #include "eigen_GPU_batch.h"
+  void foo(...){
+    gpuDoubleComplex *a, *work;
+    double *w;
+    size_t lwork;
+    ...
+    eigen_GPU_batch_ZP (L, nm, n, m, a, (double*)&lwork, NULL, NULL);
+    cudaMalloc(&work, lwork);
+    ...
+    eigen_GPU_batch_ZP (L, nm, n, m, a, w, work, stream);
+    ...
+  }
+  Use eigen_GPU_batch_CP with gpuFloatComplex/float for single precision.
+
+  Method: the same pipeline as the real code (Householder tridiagonalization,
+  QL implicit tridiagonal solve, back transformation).  The Hermitian
+  reduction uses reflectors H = I + beta u u^H (beta complex, H unitary but
+  not Hermitian, as in LAPACK zhetd2) so that the tridiagonal matrix is
+  REAL; the tridiagonal solver is therefore the real one, and the real
+  eigenvectors are applied to the complex reflectors in the back
+  transformation.  Not supported: half precision.
+
+  Test:  'make test_complex' (Makefile_hip / Makefile_cuda) builds
+  a.out-complex; run './a.out-complex' (add 'poison' to fill the lower
+  triangle with NaN and check that it is not referenced).  It checks, for
+  N = 1..257 and several matrix kinds, in units of N*eps,
+    max_j ||A v_j - w_j v_j|| / ||A||_F ,   max |V^H V - I| ,
+  the ordering of w, and the absence of NaN/Inf.  The complex path has been
+  verified on an AMD Instinct MI100 (gfx908, ROCm); it has not been run on
+  CUDA devices yet.  Note the QL tolerance is 512 eps in double and 16 eps
+  in float, so double results show larger values in these units for small N.
+
+
+
 2. Main file Structure:
   root:- eigen_GPU_batch.cu  -- 1: and 2:
        + eigen_GPU_batch.hpp
        + eigen_GPU_batch.h
        + misc_gpu.hpp
+       + complex_gpu.hpp   (gpu_complex<R>, conj/real/norm, ...)
+       + scalar_traits.hpp (real_t<T>: real type of a matrix scalar type)
        + misc.hpp
        + old_kernels/ -- 3:
        + fortran/ -- 4:
@@ -123,6 +197,7 @@ EigenG-Batched
   5: benchmark+test codes
     + main.*
     + eigen_GPU_check.*
+    + main_complex.cpp (complex Hermitian accuracy test)
 
 
 
